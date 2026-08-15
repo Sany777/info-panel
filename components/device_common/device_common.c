@@ -1,0 +1,162 @@
+#include "device_common.h"
+
+#include "esp_sleep.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "portmacro.h"
+#include "semaphore.h"
+#include "stdlib.h"
+#include "string.h"
+
+#include "device_macro.h"
+#include "device_memory.h"
+#include "wifi_service.h"
+
+#include "adc_reader.h"
+#include "clock_module.h"
+#include "sound_generator.h"
+
+#include "esp_log.h"
+
+static bool changes_main_data;
+settings_data_t main_data   = {0};
+service_data_t service_data = {0};
+
+static EventGroupHandle_t device_event_group;
+static const char *MAIN_DATA_NAME = "main_data";
+
+static int
+read_data();
+
+void
+device_set_offset(int time_offset)
+{
+    set_offset(time_offset, main_data.dst_enabled);
+    main_data.time_offset = time_offset;
+    changes_main_data     = true;
+}
+
+void
+device_set_dst(bool enabled)
+{
+    set_offset(main_data.time_offset, enabled);
+    main_data.dst_enabled = enabled;
+    changes_main_data     = true;
+}
+
+void
+device_set_pwd(const char *str)
+{
+    const int len = strnlen(str, MAX_STR_LEN);
+    memcpy(main_data.pwd, str, len);
+    main_data.pwd[len] = 0;
+    changes_main_data  = true;
+}
+
+void
+device_set_ssid(const char *str)
+{
+    const int len = strnlen(str, MAX_STR_LEN);
+    memcpy(main_data.ssid, str, len);
+    main_data.ssid[len] = 0;
+    changes_main_data   = true;
+}
+
+void
+device_set_city(const char *str)
+{
+    const int len = strnlen(str, MAX_STR_LEN);
+    memcpy(main_data.city_name, str, len);
+    main_data.city_name[len] = 0;
+    changes_main_data        = true;
+}
+
+void
+device_set_key(const char *str)
+{
+    if (strnlen(str, API_LEN + 1) == API_LEN) {
+        memcpy(main_data.api_key, str, API_LEN);
+        changes_main_data          = true;
+        main_data.api_key[API_LEN] = 0;
+    }
+}
+
+bool
+device_commit_changes()
+{
+    if (changes_main_data) {
+        CHECK_AND_RET_ERR(write_flash(MAIN_DATA_NAME, (uint8_t *)&main_data, sizeof(main_data)));
+        return true;
+    }
+    return false;
+}
+
+unsigned
+device_get_state()
+{
+    return xEventGroupGetBits(device_event_group);
+}
+
+unsigned
+device_set_state(unsigned bits)
+{
+    return xEventGroupSetBits(device_event_group, (EventBits_t)(bits));
+}
+
+unsigned
+device_clear_state(unsigned bits)
+{
+    return xEventGroupClearBits(device_event_group, (EventBits_t)(bits));
+}
+
+unsigned
+device_wait_bits_untile(unsigned bits, unsigned time_ticks)
+{
+    return xEventGroupWaitBits(device_event_group, (EventBits_t)(bits), pdFALSE, pdFALSE, time_ticks);
+}
+
+unsigned
+device_wait_bits_clear(unsigned bits, unsigned time_ticks)
+{
+    return xEventGroupWaitBits(device_event_group, (EventBits_t)(bits), pdTRUE, pdFALSE, time_ticks);
+}
+
+void
+device_wait_bits_to_clear(unsigned bits)
+{
+    while (device_get_state() & bits) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+static int
+read_data()
+{
+    service_data.update_data_time = NO_DATA;
+    CHECK_AND_RET_ERR(read_flash(MAIN_DATA_NAME, (unsigned char *)&main_data, sizeof(main_data)));
+    return ESP_OK;
+}
+
+void
+device_init()
+{
+
+    device_event_group = xEventGroupCreate();
+    device_gpio_init();
+    read_data();
+    wifi_init();
+}
+
+void
+device_set_state_isr(unsigned bits)
+{
+    BaseType_t pxHigherPriorityTaskWoken;
+    xEventGroupSetBitsFromISR(device_event_group, (EventBits_t)bits, &pxHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+}
+
+void
+device_clear_state_isr(unsigned bits)
+{
+    xEventGroupClearBitsFromISR(device_event_group, (EventBits_t)bits);
+}

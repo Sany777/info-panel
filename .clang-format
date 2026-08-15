@@ -1,0 +1,26 @@
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 120
+AllowShortIfStatementsOnASingleLine: false
+BinPackParameters: false
+AlignAfterOpenBracket: Align
+
+BreakBeforeBraces: Custom
+
+BraceWrapping:
+  AfterFunction: true       
+  AfterControlStatement: false
+  BeforeElse: false
+  IndentBraces: false
+  AfterStruct: false
+  SplitEmptyFunction: false
+
+AllowShortFunctionsOnASingleLine: Empty
+
+AlignConsecutiveAssignments: true
+# AlignConsecutiveDeclarations: true
+
+AlwaysBreakAfterReturnType: TopLevel
+

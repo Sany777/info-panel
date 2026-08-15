@@ -1,11 +1,6 @@
 #ifndef EPAPER_ICONS_H
 #define EPAPER_ICONS_H
 
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 extern const unsigned char house[];
 extern const unsigned char warning_icon[];
 
@@ -55,17 +50,5 @@ extern const unsigned char wi_fog[];
 extern const unsigned char wi_dust[];
 extern const unsigned char wi_cloudy[];
 extern const unsigned char wi_na[];
-
-
-
-
-
-#ifdef __cplusplus
-}
-#endif
-
-
-
-
 
 #endif

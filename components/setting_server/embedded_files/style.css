@@ -63,7 +63,13 @@ body {
     padding: 0px;
     margin: 0px;
     width: 100%;
-    height: fit-content;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.setting_page {
+    flex: 1;
 }
 
 

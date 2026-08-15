@@ -4,10 +4,9 @@ const ACT_PREF = 'a'
 const LIST_DAY = ['Monday','Thusday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 // [formName [type, max limit, min limit,[inputNames],]]
 const FORMS_LIST = [
-  ['Network',[['text','32','1',['SSID']],['text','32','8',['PWD']]]],
-  ['Openweather',[['text','32','1',['City']],['text','32','32',['Key']]]],
-  ['Offset',[['number','23','0',['Hour']]]],
-  ['Status',[['checkbox',0,,['Openweather Ok','SSID not found',"STA conf. Ok"]]]]
+  ['Network Settings',[['text','32','1',['SSID']],['text','32','8',['PWD']]]],
+  ['Openweather Settings',[['text','32','1',['City']],['text','32','32',['Key']]]],
+  ['Time Offset',[['number','23','-23',['Hour']], ['checkbox',0,,['Dst']]]]
 ];
 
 const modal = window.document.getElementById('modal');
@@ -27,8 +26,13 @@ function getSetting()
       if(key === 'Status'){
         const flags = Number(value);
         [...document.querySelectorAll('[type=checkbox]')].forEach((checkbox, i) =>{
-            checkbox.checked = flags&(1<<i);          
+            if (checkbox.id !== 'Dst') {
+                checkbox.checked = flags&(1<<i);          
+            }
           });
+      } else if(key === 'Dst') {
+          const input = document.getElementById(key);
+          if(input) input.checked = (value == 1);
       } else {
         const input = document.getElementById(key);
         if(input)
@@ -72,7 +76,7 @@ function createForms()
             input.minLength = minLimit;
             input.placeholder = 'Enter '+ inputName;
           } else if(type == 'checkbox' 
-              && i >= maxLimit){
+              && i >= maxLimit && inputName !== 'Dst'){
             input.disabled = true;
           } else if(type == 'number'){
             input.max = maxLimit;
@@ -81,10 +85,14 @@ function createForms()
           label.appendChild(input);
           form.appendChild(label);
         });
-        if(type != 'checkbox'){
-          form.appendChild(submit);
-        }
-    });
+      });
+      let hasNonCheckbox = false;
+      inputList.forEach(inputData => {
+          if (inputData[0] !== 'checkbox') hasNonCheckbox = true;
+      });
+      if(hasNonCheckbox){
+        form.appendChild(submit);
+      }
     container.appendChild(fieldset);
     containerForms.appendChild(container);
 });
@@ -128,18 +136,15 @@ function sendData(formName)
 {
   const js = {};
   let data = null;
-  let i=0;
   const childsList = document.forms[formName];
   if(childsList){
     for(const child of childsList){
-      let value = child.value;
-      if(value){
-        if(child.type === 'number'){
-          data = value;
-        } else if(child.type === 'text'){
-            if(data == null)
-              data = js;
-            js[child.name] = value;
+      if(child.type === 'number' || child.type === 'text' || child.type === 'checkbox'){
+        if(data == null) data = js;
+        if(child.type === 'checkbox') {
+          js[child.name] = child.checked ? 1 : 0;
+        } else if (child.value) {
+          js[child.name] = child.value;
         }
       }
     }

@@ -1,19 +1,19 @@
+#include "adc_reader.h"
+#include "device_common.h"
+#include "device_task.h"
+#include "epaper_adapter.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "device_common.h"
-#include "device_task.h"
 #include "sound_generator.h"
-#include "periodic_task.h"
-#include "adc_reader.h"
 
-
-
-
-void app_main() 
+void
+app_main()
 {
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
+    esp_log_level_set("wifi_init", ESP_LOG_ERROR);
     device_init();
-    device_init_timer();
+    sound_generator_init();
     adc_reader_init();
     task_init();
 }
