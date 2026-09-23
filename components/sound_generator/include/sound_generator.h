@@ -7,6 +7,6 @@ void start_signale_series(unsigned delay, unsigned count);
 void sound_off();
 void short_signale();
 void long_signale();
-void sig_disable();
+
 
 #endif

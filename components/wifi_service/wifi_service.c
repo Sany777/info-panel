@@ -126,9 +126,7 @@ connect_sta(const char *ssid, const char *pwd)
     CHECK_AND_RET_ERR(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config));
     device_clear_state(BIT_IS_STA_CONNECTION | BIT_ERR_SSID_NOT_FOUND);
     CHECK_AND_RET_ERR(esp_wifi_start());
-    vTaskDelay(500 / portTICK_PERIOD_MS);
     if (device_wait_bits(BIT_IS_STA_CONNECTION) & BIT_IS_STA_CONNECTION) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
         return ESP_OK;
     }
     ESP_LOGE("", "err timeout sta");

@@ -11,6 +11,7 @@
 #include "portmacro.h"
 #include "stdbool.h"
 #include "string.h"
+#include "time.h"
 
 #include "adc_reader.h"
 #include "clock_module.h"
@@ -32,7 +33,6 @@ enum TimeoutMS {
     TIMEOUT_FOUR_MINUTE   = 4 * TIMEOUT_MINUTE,
     TIMEOUT_HOUR          = 60 * TIMEOUT_MINUTE,
     TIMEOUT_4_HOUR        = 4 * TIMEOUT_HOUR,
-    DELAY_UPDATE_FORECAST = 32 * TIMEOUT_MINUTE,
     LONG_PRESS_TIME       = TIMEOUT_SEC,
 };
 
@@ -40,7 +40,23 @@ enum TaskDelay {
     DELAY_SERV = 100,
 };
 
-static int delay_update_forecast = 2 * TIMEOUT_MINUTE;
+enum {
+    FETCH_LATENCY_BUDGET = TIMEOUT_MINUTE,
+};
+
+static const uint32_t kRetryStepsMs[] = {
+    1 * TIMEOUT_MINUTE,
+    2 * TIMEOUT_MINUTE,
+    4 * TIMEOUT_MINUTE,
+    8 * TIMEOUT_MINUTE,
+    45 * TIMEOUT_MINUTE,
+    60 * TIMEOUT_MINUTE,
+};
+enum { RETRY_STEP_COUNT = sizeof(kRetryStepsMs) / sizeof(kRetryStepsMs[0]) };
+
+static int retry_step               = 0;
+static bool screen_ever_rendered    = false;
+static uint64_t delay_update_forecast = TIMEOUT_MINUTE;
 static esp_timer_handle_t touch_timer;
 
 static void
@@ -104,29 +120,40 @@ show_screen()
         epaper_printf(5, 5, FONT_SIZE_16, BLACK, "%s", main_data.city_name);
     }
 
-    unsigned bits = device_get_state();
-    if (service_data.update_data_time == NO_DATA && !(bits & BIT_FORECAST_OK)) {
-        if (bits & BIT_STA_CONF_OK) {
-            epaper_print_centered_str(80, FONT_SIZE_16, BLACK, "Updating data");
-        } else if (bits & BIT_ERR_SSID_NOT_FOUND) {
-            epaper_print_centered_str(80, FONT_SIZE_16, BLACK, "No wifi network found");
-        } else {
-            epaper_print_centered_str(80, FONT_SIZE_16, BLACK, "No data available");
-        }
+    int udt       = service_data.update_data_time;
+    int data_indx = get_actual_forecast_data_index(cur_hour, udt);
+    if (data_indx == NO_DATA) {
+        epaper_printf_centered(60, FONT_SIZE_16, BLACK, "Data update time %d:%02d", udt,
+                               service_data.update_data_min);
     } else {
-        int udt       = service_data.update_data_time;
-        int data_indx = get_actual_forecast_data_index(cur_hour, udt);
-        if (data_indx == NO_DATA) {
-            epaper_printf_centered(60, FONT_SIZE_16, BLACK, "Data update time %d:%02d", udt,
-                                   service_data.update_data_min);
-        } else {
-            epaper_printf(5, 25, FONT_SIZE_12, RED, "%d:%02d", udt, service_data.update_data_min);
-            epaper_printf(5, 40, FONT_SIZE_12, RED, "%02d.%02d", service_data.update_data_day,
-                          service_data.update_data_mon);
-            draw_forecast_main(data_indx, cur_hour, is_day);
-            draw_forecast_timeline(udt);
-        }
+        epaper_printf(5, 25, FONT_SIZE_12, RED, "%d:%02d", udt, service_data.update_data_min);
+        epaper_printf(5, 40, FONT_SIZE_12, RED, "%02d.%02d", service_data.update_data_day,
+                      service_data.update_data_mon);
+        draw_forecast_main(data_indx, cur_hour, is_day);
+        draw_forecast_timeline(udt);
     }
+}
+
+static void
+draw_status_screen()
+{
+    float voltage = device_get_voltage();
+    epaper_clear();
+    draw_status_bar(voltage);
+
+    if (main_data.city_name[0] != '\0') {
+        epaper_printf(5, 5, FONT_SIZE_16, BLACK, "%s", main_data.city_name);
+    }
+
+    unsigned bits = device_get_state();
+    if (bits & BIT_STA_CONF_OK) {
+        epaper_print_centered_str(80, FONT_SIZE_16, BLACK, "Updating data");
+    } else if (bits & BIT_ERR_SSID_NOT_FOUND) {
+        epaper_print_centered_str(80, FONT_SIZE_16, BLACK, "No wifi network found");
+    } else {
+        epaper_print_centered_str(80, FONT_SIZE_16, BLACK, "No data available");
+    }
+    epaper_update();
 }
 
 static void
@@ -168,10 +195,7 @@ touch_poll_timer_cb(void *arg)
 static void
 handle_wakeup()
 {
-    device_set_pin(PIN_EP_EN, 1);
     device_set_state(BIT_DEVICE_BUSY);
-
-    epaper_init();
     check_battery_voltage();
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
@@ -199,12 +223,52 @@ handle_wakeup()
     }
 }
 
+static uint64_t
+ms_until_next_hour(const struct tm *now)
+{
+    long elapsed_ms   = (now->tm_min * 60L + now->tm_sec) * 1000L;
+    long remaining_ms = 3600000L - elapsed_ms;
+    if (remaining_ms <= 0) {
+        remaining_ms += 3600000L;
+    }
+
+    if (remaining_ms <= FETCH_LATENCY_BUDGET) {
+        return (uint64_t)(remaining_ms + 3600000L - FETCH_LATENCY_BUDGET);
+    }
+    return (uint64_t)(remaining_ms - FETCH_LATENCY_BUDGET);
+}
+
+static struct tm
+get_effective_update_time(const struct tm *sampled_now)
+{
+    struct tm effective = *sampled_now;
+    if (effective.tm_min == 59) {
+        time_t t = mktime(&effective) + 60;
+        localtime_r(&t, &effective);
+    }
+    return effective;
+}
+
+static uint64_t
+schedule_next_forecast_delay(bool success, const struct tm *now)
+{
+    if (success) {
+        retry_step = 0;
+        return ms_until_next_hour(now);
+    }
+
+    uint64_t delay = (uint64_t)kRetryStepsMs[retry_step];
+    if (retry_step < RETRY_STEP_COUNT - 1) {
+        retry_step++;
+    }
+    return delay;
+}
+
 static void
 fetch_forecast()
 {
     ESP_LOGI("DEVICE_TASK", "Updating forecast data");
     int esp_res;
-    struct tm *tinfo;
     static bool fail_init_sntp = false;
 
     esp_res = connect_sta(main_data.ssid, main_data.pwd);
@@ -218,17 +282,19 @@ fetch_forecast()
         esp_res = update_forecast_data(main_data.city_name, main_data.api_key);
     }
 
+    struct tm now_raw = *get_cur_time_tm();
+
     if (esp_res == ESP_OK) {
-        tinfo = get_cur_time_tm();
-        if (fail_init_sntp || service_data.update_data_time > tinfo->tm_hour) {
+        struct tm effective_now = get_effective_update_time(&now_raw);
+
+        if (fail_init_sntp || service_data.update_data_time > effective_now.tm_hour) {
             esp_restart();
         }
-        service_data.update_data_time = tinfo->tm_hour;
-        service_data.update_data_min  = tinfo->tm_min;
-        service_data.update_data_day  = tinfo->tm_mday;
-        service_data.update_data_mon  = tinfo->tm_mon + 1;
+        service_data.update_data_time = effective_now.tm_hour;
+        service_data.update_data_min  = effective_now.tm_min;
+        service_data.update_data_day  = effective_now.tm_mday;
+        service_data.update_data_mon  = effective_now.tm_mon + 1;
         if (!(device_get_state() & BIT_FORECAST_OK)) {
-            delay_update_forecast = DELAY_UPDATE_FORECAST;
             device_set_state(BIT_FORECAST_OK);
         }
     } else {
@@ -236,12 +302,16 @@ fetch_forecast()
         if (!fail_init_sntp && service_data.update_data_time == NO_DATA) {
             fail_init_sntp = true;
         }
-        if (delay_update_forecast < DELAY_UPDATE_FORECAST) {
-            delay_update_forecast *= 2;
-        }
     }
+
+    delay_update_forecast = schedule_next_forecast_delay(esp_res == ESP_OK, &now_raw);
+
     wifi_stop();
-    device_set_state(BIT_UPDATE_SCREEN);
+    if (esp_res == ESP_OK || !screen_ever_rendered) {
+        device_set_state(BIT_UPDATE_SCREEN);
+    } else {
+        device_set_state(BIT_GOTO_SLEEP);
+    }
 }
 
 static void
@@ -265,6 +335,8 @@ run_settings_server()
     bool open_sesion        = false;
 
     float voltage = device_get_voltage();
+    device_set_pin(PIN_EP_EN, 1);
+    epaper_init();
     epaper_clear();
     draw_status_bar(voltage);
     epaper_print_centered_str(15, FONT_SIZE_16, BLACK, "AP MODE ACTIVE");
@@ -280,6 +352,7 @@ run_settings_server()
     epaper_printf(10, 95, FONT_SIZE_12, BLACK, "Token: %s", main_data.api_key[0] != '\0' ? "OK" : "Missing");
     epaper_printf(10, 110, FONT_SIZE_12, BLACK, "Bat: %.2fV", voltage);
     epaper_update();
+    device_set_pin(PIN_EP_EN, 0);
 
     while (device_get_touch_but_state() != NO_DATA) {
         vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -338,10 +411,28 @@ run_settings_server()
 static void
 render_and_sleep()
 {
+    device_set_pin(PIN_EP_EN, 1);
+    epaper_init();
+
+    if (service_data.update_data_time == NO_DATA) {
+        if (!screen_ever_rendered) {
+            ESP_LOGI("DEVICE_TASK", "No forecast data yet, showing status screen");
+            draw_status_screen();
+            screen_ever_rendered = true;
+        } else {
+            ESP_LOGI("DEVICE_TASK", "No forecast data, keeping previous screen");
+        }
+        device_set_pin(PIN_EP_EN, 0);
+        device_set_state(BIT_GOTO_SLEEP);
+        return;
+    }
+
     ESP_LOGI("DEVICE_TASK", "Updating screen");
     epaper_clear();
     show_screen();
     epaper_update();
+    device_set_pin(PIN_EP_EN, 0);
+    screen_ever_rendered = true;
     device_set_state(BIT_GOTO_SLEEP);
 }
 
@@ -354,7 +445,7 @@ goto_sleep()
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
     device_set_pin(PIN_EP_EN, 0);
-    esp_sleep_enable_timer_wakeup(delay_update_forecast * 1000);
+    esp_sleep_enable_timer_wakeup((uint64_t)delay_update_forecast * 1000ULL);
 
     device_clear_state(BIT_DEVICE_BUSY);
     esp_light_sleep_start();

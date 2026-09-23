@@ -1,3 +1,8 @@
+.agents/
+.devcontainer/
+.agents/
+build/
+
 # Бінарні файли
 *.o
 *.ko
